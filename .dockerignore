@@ -1,10 +1,9 @@
-.git
-.github
 node_modules
 playwright-report
 test-results
+.git
+.github
 tasks
 brand
 scripts
-tests
-npm-debug.log*
+README.md

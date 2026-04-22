@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://artemis-2-wallpaper.lol/sitemap.xml
+Sitemap: https://innocentwitness.lol/sitemap.xml

@@ -1,0 +1,82 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  namespace: {{BUILD_NAMESPACE}}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: {{TTL_SECONDS}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{APP_NAME}}-build
+        app.kubernetes.io/part-of: {{APP_NAME}}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{SERVICE_ACCOUNT_NAME}}
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: {{REGISTRY_SECRET_NAME}}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        - name: github-token
+          secret:
+            secretName: {{GIT_SECRET_NAME}}
+            optional: true
+            items:
+              - key: {{GIT_TOKEN_KEY}}
+                path: token
+      initContainers:
+        - name: fetch-source
+          image: alpine:3.21
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              apk add --no-cache curl tar >/dev/null
+              public_archive_url="https://github.com/{{GITHUB_REPOSITORY}}/archive/{{GIT_SHA}}.tar.gz"
+              private_archive_url="https://api.github.com/repos/{{GITHUB_REPOSITORY}}/tarball/{{GIT_SHA}}"
+              token_file="/var/run/secrets/github/token"
+
+              if [ -f "$token_file" ]; then
+                auth_header="Authorization: Bearer $(cat "$token_file")"
+                curl -fsSL \
+                  -H "$auth_header" \
+                  -H "Accept: application/vnd.github+json" \
+                  "$private_archive_url" \
+                  -o /workspace/src.tar.gz
+              else
+                curl -fsSL "$public_archive_url" -o /workspace/src.tar.gz
+              fi
+
+              tar -xzf /workspace/src.tar.gz -C /workspace --strip-components=1
+              rm /workspace/src.tar.gz
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: github-token
+              mountPath: /var/run/secrets/github
+              readOnly: true
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:v1.23.2
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=/workspace/{{DOCKERFILE_PATH}}
+            - --destination={{IMAGE_NAME}}:{{IMAGE_TAG}}
+            - --cache=true
+            - --cache-repo={{CACHE_REPO}}
+            - --snapshot-mode=redo
+            - --use-new-run
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: docker-config
+              mountPath: /kaniko/.docker
+              readOnly: true

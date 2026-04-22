@@ -1,14 +1,18 @@
 {
-  "name": "artemis-2-wallpaper",
+  "name": "innocentwitness",
   "version": "1.0.0",
   "private": true,
-  "description": "Static Artemis II wallpaper site built from publicly released NASA imagery.",
+  "description": "Static editorial site for the keyword 無垢なる証人 / innocent witness.",
   "scripts": {
+    "assets:brand": "python3 scripts/generate_brand_assets.py",
+    "assets:posters": "python3 scripts/fetch_reference_posters.py",
+    "gsc:setup": "python3 scripts/setup_gsc_domain.py --domain innocentwitness.lol --sitemap-url https://innocentwitness.lol/sitemap.xml",
+    "smoke:live": "python3 scripts/smoke_live.py",
     "start": "node server.js",
     "test": "playwright test",
     "test:browser": "playwright test"
   },
   "devDependencies": {
-    "@playwright/test": "^1.54.2"
+    "@playwright/test": "^1.55.0"
   }
 }

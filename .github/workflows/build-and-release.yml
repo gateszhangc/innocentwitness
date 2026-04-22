@@ -10,16 +10,51 @@ permissions:
   contents: read
 
 concurrency:
-  group: artemis-2-wallpaper-release
+  group: innocentwitness-release
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: registry.144.91.77.245.sslip.io/dokploy-fleet-artemis-2-wallpaper-artemis-2-wallpaper
-  FLEET_REPO: gateszhangc/k8s-fleet
-  FLEET_TENANT_PATH: tenants/artemis-2-wallpaper/20-artemis-2-wallpaper-deployment.yaml
+  REGISTRY_HOST: ${{ vars.REGISTRY_HOST || 'registry.144.91.77.245.sslip.io' }}
+  IMAGE_REPOSITORY: ${{ vars.IMAGE_REPOSITORY || 'dokploy-fleet-innocentwitness-innocentwitness' }}
+  IMAGE_NAME: ${{ format('{0}/{1}', vars.REGISTRY_HOST || 'registry.144.91.77.245.sslip.io', vars.IMAGE_REPOSITORY || 'dokploy-fleet-innocentwitness-innocentwitness') }}
+  FLEET_REPO: ${{ vars.FLEET_REPO || 'gateszhangc/k8s-fleet' }}
+  FLEET_KUSTOMIZATION_PATH: ${{ vars.FLEET_KUSTOMIZATION_PATH || 'tenants/innocentwitness/kustomization.yaml' }}
+  FLEET_IMAGE_NAME: ${{ vars.FLEET_IMAGE_NAME || format('{0}/{1}', vars.REGISTRY_HOST || 'registry.144.91.77.245.sslip.io', vars.IMAGE_REPOSITORY || 'dokploy-fleet-innocentwitness-innocentwitness') }}
+  K8S_BUILD_NAMESPACE: ${{ vars.K8S_BUILD_NAMESPACE || 'dokploy-fleet-build' }}
+  K8S_BUILD_SERVICE_ACCOUNT: ${{ vars.K8S_BUILD_SERVICE_ACCOUNT || 'kaniko-builder' }}
+  K8S_DOCKER_CONFIG_SECRET: ${{ vars.K8S_DOCKER_CONFIG_SECRET || 'fleet-registry-push' }}
+  K8S_GITHUB_TOKEN_SECRET: ${{ vars.K8S_GITHUB_TOKEN_SECRET || 'github-repo-reader' }}
+  K8S_GITHUB_TOKEN_KEY: ${{ vars.K8S_GITHUB_TOKEN_KEY || 'token' }}
+  K8S_JOB_TTL_SECONDS: ${{ vars.K8S_JOB_TTL_SECONDS || '600' }}
+  BUILD_JOB_TEMPLATE: deploy/build/image-build-job.yaml
+  DOCKERFILE_PATH: Dockerfile
 
 jobs:
+  test:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser tests
+        run: npm test
+
   build-and-push:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]')
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
@@ -29,30 +64,63 @@ jobs:
 
       - name: Derive image tag
         id: meta
-        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_job_name=innocentwitness-image-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "cache_repo=${REGISTRY_HOST}/${IMAGE_REPOSITORY}-cache" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
 
-      - name: Log in to registry
-        uses: docker/login-action@v3
-        with:
-          registry: registry.144.91.77.245.sslip.io
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA || secrets.KUBE_CONFIG }}
+        run: |
+          test -n "$KUBE_CONFIG_DATA"
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG_DATA" | base64 --decode > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
+      - name: Render K8s build job manifest
+        run: |
+          python3 scripts/render_k8s_build_job.py \
+            --template "$BUILD_JOB_TEMPLATE" \
+            --output "$RUNNER_TEMP/k8s-build-job.yaml" \
+            --job-name "${{ steps.meta.outputs.build_job_name }}" \
+            --namespace "$K8S_BUILD_NAMESPACE" \
+            --app-name "innocentwitness" \
+            --service-account-name "$K8S_BUILD_SERVICE_ACCOUNT" \
+            --git-secret-name "$K8S_GITHUB_TOKEN_SECRET" \
+            --git-token-key "$K8S_GITHUB_TOKEN_KEY" \
+            --registry-secret-name "$K8S_DOCKER_CONFIG_SECRET" \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --git-ref "${GITHUB_REF_NAME}" \
+            --git-sha "${GITHUB_SHA}" \
+            --image-name "$IMAGE_NAME" \
+            --image-tag "${{ steps.meta.outputs.image_tag }}" \
+            --cache-repo "${{ steps.meta.outputs.cache_repo }}" \
+            --dockerfile-path "$DOCKERFILE_PATH" \
+            --ttl-seconds "$K8S_JOB_TTL_SECONDS"
+
+      - name: Run K8s build job
+        run: |
+          kubectl -n "$K8S_BUILD_NAMESPACE" delete job "${{ steps.meta.outputs.build_job_name }}" --ignore-not-found
+          kubectl apply -f "$RUNNER_TEMP/k8s-build-job.yaml"
+          if ! kubectl -n "$K8S_BUILD_NAMESPACE" wait --for=condition=complete "job/${{ steps.meta.outputs.build_job_name }}" --timeout=45m; then
+            kubectl -n "$K8S_BUILD_NAMESPACE" describe "job/${{ steps.meta.outputs.build_job_name }}" || true
+            kubectl -n "$K8S_BUILD_NAMESPACE" logs "job/${{ steps.meta.outputs.build_job_name }}" --all-containers=true || true
+            exit 1
+          fi
+          kubectl -n "$K8S_BUILD_NAMESPACE" logs "job/${{ steps.meta.outputs.build_job_name }}" --all-containers=true
 
   update-fleet:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]')
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - name: Check out site repo
+        uses: actions/checkout@v4
+
       - name: Check out fleet repo
         uses: actions/checkout@v4
         with:
@@ -60,28 +128,14 @@ jobs:
           token: ${{ secrets.FLEET_REPO_PAT }}
           path: k8s-fleet
 
-      - name: Update deployment image tag
+      - name: Update kustomization image tag
         env:
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path("k8s-fleet") / os.environ["FLEET_TENANT_PATH"]
-          content = path.read_text()
-          updated, count = re.subn(
-              r"(^\s*image:\s*registry\.144\.91\.77\.245\.sslip\.io/dokploy-fleet-artemis-2-wallpaper-artemis-2-wallpaper:).*$",
-              rf"\1{os.environ['IMAGE_TAG']}",
-              content,
-              count=1,
-              flags=re.MULTILINE,
-          )
-          if count != 1:
-              raise SystemExit("Expected exactly one image line to update in the fleet deployment manifest.")
-          path.write_text(updated)
-          PY
+          python3 scripts/update_kustomization_newtag.py \
+            --file "k8s-fleet/${FLEET_KUSTOMIZATION_PATH}" \
+            --image "${FLEET_IMAGE_NAME}" \
+            --new-tag "${IMAGE_TAG}"
 
       - name: Commit fleet update
         env:
@@ -90,9 +144,9 @@ jobs:
           cd k8s-fleet
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FLEET_TENANT_PATH"
+          git add "$FLEET_KUSTOMIZATION_PATH"
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "chore: release artemis-2-wallpaper ${IMAGE_TAG}"
+          git commit -m "chore: release innocentwitness ${IMAGE_TAG}"
           git push origin HEAD:main
