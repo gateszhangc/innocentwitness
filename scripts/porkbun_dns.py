@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -11,13 +12,15 @@ from urllib.request import Request, urlopen
 
 
 API_BASE = "https://api.porkbun.com/api/json/v3"
+RETRYABLE_STATUS_CODES = {502, 503, 504}
+MAX_ATTEMPTS = 5
 
 
 def credentials() -> tuple[str, str]:
     api_key = os.environ.get("PORKBUN_API_KEY")
     secret_key = os.environ.get("PORKBUN_SECRET_API_KEY")
     if not api_key or not secret_key:
-      raise SystemExit("PORKBUN_API_KEY and PORKBUN_SECRET_API_KEY must be set.")
+        raise SystemExit("PORKBUN_API_KEY and PORKBUN_SECRET_API_KEY must be set.")
     return api_key, secret_key
 
 
@@ -37,12 +40,16 @@ def api_post(path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]
         method="POST",
     )
 
-    try:
-        with urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        details = error.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"Porkbun API request failed: {error.code} {details}") from error
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            details = error.read().decode("utf-8", errors="replace")
+            if error.code in RETRYABLE_STATUS_CODES and attempt < MAX_ATTEMPTS:
+                time.sleep(attempt)
+                continue
+            raise SystemExit(f"Porkbun API request failed: {error.code} {details}") from error
 
 
 def retrieve_by_name_type(domain: str, record_type: str, name: str) -> list[dict[str, Any]]:

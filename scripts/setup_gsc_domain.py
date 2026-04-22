@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -14,29 +15,68 @@ import porkbun_dns
 
 SITE_VERIFICATION_BASE = "https://www.googleapis.com/siteVerification/v1"
 SEARCH_CONSOLE_BASE = "https://www.googleapis.com/webmasters/v3"
+GOOGLE_SCOPES = ",".join(
+    [
+        "https://www.googleapis.com/auth/siteverification",
+        "https://www.googleapis.com/auth/webmasters",
+    ]
+)
 
 
 def run(cmd: list[str]) -> str:
     return subprocess.check_output(cmd, text=True).strip()
 
 
-def access_token() -> str:
+def quota_project() -> str | None:
     for command in (
-        ["gcloud", "auth", "print-access-token"],
-        ["gcloud", "auth", "application-default", "print-access-token"],
+        ["gcloud", "config", "get-value", "billing/quota_project"],
+        ["gcloud", "config", "get-value", "project"],
     ):
         try:
-            token = run(command)
-            if token:
-                return token
+            value = run(command)
         except subprocess.CalledProcessError:
             continue
-    raise SystemExit("Failed to obtain a Google access token from gcloud.")
+        if value and value not in {"(unset)", "CURRENT_PROJECT"}:
+            return value
+
+    credentials_path = Path.home() / ".config/gcloud/application_default_credentials.json"
+    if credentials_path.exists():
+        data = json.loads(credentials_path.read_text())
+        value = data.get("quota_project_id")
+        if value:
+            return value
+
+    return None
+
+
+def access_token() -> str:
+    command = [
+        "gcloud",
+        "auth",
+        "application-default",
+        "print-access-token",
+        f"--scopes={GOOGLE_SCOPES}",
+    ]
+    try:
+        token = run(command)
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(
+            "Failed to obtain a Google ADC access token. "
+            "Run `gcloud auth application-default login --scopes="
+            f"{GOOGLE_SCOPES}` and retry."
+        ) from error
+
+    if not token:
+        raise SystemExit("Google ADC returned an empty access token.")
+    return token
 
 
 def google_request(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, str]:
     data = None
     headers = {"Authorization": f"Bearer {token}"}
+    quota = quota_project()
+    if quota:
+        headers["X-Goog-User-Project"] = quota
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
